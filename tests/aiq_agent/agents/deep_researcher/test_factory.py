@@ -16,6 +16,7 @@
 """Tests for deep researcher graph and middleware factory helpers."""
 
 from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock
 from unittest.mock import patch
 
 from deepagents.middleware.filesystem import _apply_permissions_to_ls_results
@@ -137,6 +138,7 @@ def _graph_context(
         domain_catalog_path=None,
         current_datetime="2026-06-03 12:00:00",
         max_research_concurrency=6,
+        max_researcher_model_calls=100,
         resource_limits=limits,
         enable_source_router=enable_source_router,
         backend=runtime.backend,
@@ -364,6 +366,7 @@ def test_graph_uses_researcher_config_key_for_researcher_skills():
             callbacks=[],
             domain_catalog_path=None,
             max_research_concurrency=6,
+            max_researcher_model_calls=100,
             final_report_tracker=FinalReportCommitTracker(),
         )
 
@@ -399,6 +402,7 @@ def test_graph_wires_filesystem_tool_call_guard_cross_cutting():
             callbacks=[],
             domain_catalog_path=None,
             max_research_concurrency=6,
+            max_researcher_model_calls=100,
             final_report_tracker=FinalReportCommitTracker(),
         )
 
@@ -460,6 +464,7 @@ def test_graph_default_limits_are_shared_with_state_budget_ledger():
             callbacks=[],
             domain_catalog_path=None,
             max_research_concurrency=6,
+            max_researcher_model_calls=100,
             final_report_tracker=FinalReportCommitTracker(),
         )
 
@@ -496,7 +501,7 @@ def test_researcher_runnable_uses_rendered_prompt_and_runtime_middleware():
     researcher_agent = MagicMock()
     researcher_model = MagicMock()
     shared_middleware = [MagicMock(name="shared_middleware")]
-    backend = MagicMock()
+    backend = NonCallableMagicMock()
 
     with (
         patch(
@@ -513,6 +518,7 @@ def test_researcher_runnable_uses_rendered_prompt_and_runtime_middleware():
             researcher_tools=[web_search_tool],
             system_prompt="rendered researcher prompt",
             researcher_middleware=shared_middleware,
+            max_researcher_model_calls=100,
             skill_sources=["/skills/research/"],
             backend=backend,
             visibility_middleware=[ToolVisibilityMiddleware(hidden_tool_names={"execute"})],
@@ -532,3 +538,4 @@ def test_researcher_runnable_uses_rendered_prompt_and_runtime_middleware():
     assert "StructuredResponseTextFallbackMiddleware" in middleware_names
     assert "ToolVisibilityMiddleware" in middleware_names
     assert kwargs["middleware"][-2] is shared_middleware[0]
+    assert middleware_names[0] == "NemoRelayMiddleware"

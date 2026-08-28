@@ -50,6 +50,7 @@ from aiq_agent.agents.deep_researcher.custom_middleware import StructuredRespons
 from aiq_agent.agents.deep_researcher.custom_middleware import TodoQuotaMiddleware
 from aiq_agent.agents.deep_researcher.custom_middleware import TodoSuppressionMiddleware
 from aiq_agent.agents.deep_researcher.custom_middleware import ToolNameSanitizationMiddleware
+from aiq_agent.agents.deep_researcher.custom_middleware import ToolRetryMiddleware
 from aiq_agent.agents.deep_researcher.custom_middleware import ToolVisibilityMiddleware
 from aiq_agent.agents.deep_researcher.models import SourceRoutingPlan
 from aiq_agent.agents.deep_researcher.resource_limits import DeepResearchResourceLimits
@@ -58,6 +59,7 @@ from aiq_agent.agents.deep_researcher.tools.source_registry import build_get_ver
 from aiq_agent.common.citation_verification import SourceEntry
 from aiq_agent.common.data_source_registry import populate_from_config
 from aiq_agent.common.data_source_registry import reset_registry
+from aiq_agent.common.logging_utils import log_content_metadata
 
 
 class _ToolBindingFakeChatModel(FakeMessagesListChatModel):
@@ -1024,14 +1026,33 @@ class TestToolNameSanitizationMiddleware:
 
     @pytest.mark.asyncio
     async def test_awrap_model_call_sanitizes_tool_calls(self, middleware):
-        """Integration: middleware sanitizes tool_calls in AIMessage."""
+        """Sanitize tool names without dropping provider, usage, or response metadata."""
         from langchain.agents.middleware.types import ModelResponse
 
+        response_metadata = {"model_name": "nvidia/nemotron-3-ultra-550b-a55b", "finish_reason": "tool_calls"}
+        usage_metadata = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+        expected_response_metadata = dict(response_metadata)
+        expected_usage_metadata = dict(usage_metadata)
         ai_msg = AIMessage(
             content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {
+                            "name": "advanced_web_search_tool<|channel|>commentary",
+                            "arguments": '{"question":"test"}',
+                        },
+                    }
+                ],
+                "provider_field": "preserve-me",
+            },
+            response_metadata=response_metadata,
             tool_calls=[
                 {"name": "advanced_web_search_tool<|channel|>commentary", "args": {"question": "test"}, "id": "tc1"},
             ],
+            usage_metadata=usage_metadata,
         )
         mock_response = ModelResponse(result=[ai_msg])
         mock_handler = AsyncMock(return_value=mock_response)
@@ -1039,7 +1060,12 @@ class TestToolNameSanitizationMiddleware:
 
         result = await middleware.awrap_model_call(mock_request, mock_handler)
 
-        assert result.result[0].tool_calls[0]["name"] == "advanced_web_search_tool"
+        message = result.result[0]
+        assert message.tool_calls[0]["name"] == "advanced_web_search_tool"
+        assert message.additional_kwargs["tool_calls"][0]["function"]["name"] == "advanced_web_search_tool"
+        assert message.additional_kwargs["provider_field"] == "preserve-me"
+        assert message.response_metadata == expected_response_metadata
+        assert message.usage_metadata == expected_usage_metadata
 
     @pytest.mark.asyncio
     async def test_awrap_model_call_no_tool_calls_passthrough(self, middleware):
@@ -1055,6 +1081,30 @@ class TestToolNameSanitizationMiddleware:
 
         assert result.result[0].content == "Just text, no tools"
         assert not result.result[0].tool_calls
+
+
+class TestToolRetryMiddleware:
+    """Tests for metadata-safe tool retry diagnostics."""
+
+    @pytest.mark.asyncio
+    async def test_retry_log_redacts_model_tool_name_and_error_detail(self, caplog):
+        tool_name = "tool_VDR_MODEL_SECRET_7e91"  # pragma: allowlist secret
+        error_detail = "backend VDR_TOOL_ERROR_SECRET_91ad"  # pragma: allowlist secret
+        request = SimpleNamespace(tool_call={"name": tool_name})
+        handler = AsyncMock(side_effect=[RuntimeError(error_detail), "ok"])
+        middleware = ToolRetryMiddleware(max_retries=1, initial_delay=0)
+
+        with caplog.at_level(logging.WARNING, logger="aiq_agent.agents.deep_researcher.custom_middleware"):
+            result = await middleware.awrap_tool_call(request, handler)
+
+        assert result == "ok"
+        assert handler.await_count == 2
+        assert tool_name not in caplog.text
+        assert error_detail not in caplog.text
+        assert log_content_metadata(tool_name) in caplog.text
+        assert log_content_metadata(error_detail) in caplog.text
+        assert "attempt 1/2" in caplog.text
+        assert "error_type=RuntimeError" in caplog.text
 
 
 class TestToolVisibilityMiddleware:
@@ -1361,6 +1411,21 @@ class TestSourceRegistryMiddleware:
 
         urls = {s.url for s in middleware.registry.all_sources()}
         assert urls == {"https://a.com/page", "https://b.com/page"}
+
+    @pytest.mark.asyncio
+    async def test_captured_source_log_does_not_expose_tool_result(self, middleware, caplog):
+        secret = "nvapi-vdr-fake-secret-do-not-log"  # pragma: allowlist secret
+        content = f"Found result at https://example.com/page?token={secret}"
+        handler = AsyncMock(return_value=self._make_tool_result(content))
+        request = self._make_request("advanced_web_search_tool")
+        caplog.set_level(logging.INFO, logger="aiq_agent.agents.deep_researcher.custom_middleware")
+
+        await middleware.awrap_tool_call(request, handler)
+
+        assert middleware.registry.all_sources()
+        assert secret not in caplog.text
+        assert "https://example.com/page" not in caplog.text
+        assert "Captured 1 source(s)" in caplog.text
 
     @pytest.mark.asyncio
     async def test_typed_error_result_is_not_captured(self, middleware):
@@ -1723,20 +1788,25 @@ class TestSourceRoutingPersistenceMiddleware:
         assert path == "/shared/source_routing.json"
         assert json.loads(content) == self._routing()
 
-    def test_rolls_back_budget_when_backend_rejects_route(self) -> None:
+    def test_rolls_back_budget_when_backend_rejects_route(self, caplog) -> None:
         limits = DeepResearchResourceLimits(max_state_file_count=1)
         ledger = StateBudgetLedger(limits=limits, files={}, sandbox_enabled=True)
         backend = MagicMock()
-        backend.upload_files.return_value = [SimpleNamespace(path="/shared/source_routing.json", error="private")]
+        error_detail = "nvapi-vdr-fake-secret-do-not-log"
+        backend.upload_files.return_value = [SimpleNamespace(path="/shared/source_routing.json", error=error_detail)]
         middleware = SourceRoutingPersistenceMiddleware(
             backend=backend,
             state_budget=ledger,
             resource_limits=limits,
         )
 
-        with pytest.raises(RuntimeError, match="Failed to persist source routing"):
-            middleware.after_agent({"structured_response": self._routing()}, None)
+        with caplog.at_level(logging.ERROR, logger="aiq_agent.agents.deep_researcher.custom_middleware"):
+            with pytest.raises(RuntimeError, match="Failed to persist source routing") as exc:
+                middleware.after_agent({"structured_response": self._routing()}, None)
 
+        assert error_detail not in str(exc.value)
+        assert error_detail not in caplog.text
+        assert log_content_metadata(f"/shared/source_routing.json: {error_detail}") in caplog.text
         ledger.reserve([("/shared/plan.json", b"ok")])
 
     def test_serialized_byte_boundary_uses_dedicated_source_routing_limit(self) -> None:
@@ -1899,11 +1969,13 @@ class TestPlanPersistenceMiddleware:
 
     @pytest.mark.asyncio
     async def test_upload_error_response_propagates(self, caplog):
-        """Non-empty upload errors abort the task; backend detail stays in logs only."""
+        """Non-empty upload errors abort the task without exposing backend detail."""
+
+        error_detail = "nvapi-vdr-fake-secret-do-not-log"
 
         class _ErrorBackend:
             def upload_files(self, files):
-                return [SimpleNamespace(path="/shared/plan.json", error="disk full")]
+                return [SimpleNamespace(path="/shared/plan.json", error=error_detail)]
 
         mw = PlanPersistenceMiddleware(backend=_ErrorBackend())
 
@@ -1911,5 +1983,6 @@ class TestPlanPersistenceMiddleware:
             with pytest.raises(RuntimeError, match="Failed to persist the research plan") as exc:
                 await mw.aafter_agent({"structured_response": {"title": "Plan"}}, runtime=None)
 
-        assert "disk full" not in str(exc.value)  # sanitized out of the raised error
-        assert "disk full" in caplog.text  # but preserved in logs
+        assert error_detail not in str(exc.value)
+        assert error_detail not in caplog.text
+        assert log_content_metadata(f"/shared/plan.json: {error_detail}") in caplog.text

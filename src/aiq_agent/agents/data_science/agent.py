@@ -191,7 +191,7 @@ class DataScienceAgent:
         """Execute one request while preserving any caller-owned source registry."""
         self._validate_question(state)
         registry_token = None
-        analysis_run_token = begin_analysis_run()
+        analysis_run_token = begin_analysis_run(database_name=state.database_name)
         gsf_run_token = begin_gsf_run(self.gsf_budget)
         registry = get_session_registry()
         if registry is None:

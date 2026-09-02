@@ -141,6 +141,28 @@ async def test_direct_workflow_returns_typed_no_source_response():
 
 
 @pytest.mark.asyncio
+async def test_direct_workflow_extracts_fdabench_database_scope():
+    result = DataScienceAgentState(messages=[HumanMessage(content="query"), AIMessage(content="Answer: 3")])
+    agent_fn = MagicMock()
+    agent_fn.ainvoke = AsyncMock(return_value=result)
+    builder = MagicMock()
+    builder.get_function = AsyncMock(return_value=agent_fn)
+    config = data_science_register.DataScienceWorkflowConfig()
+    registration = data_science_register.data_science_workflow.__wrapped__(config, builder)
+    function_info = await anext(registration)
+    try:
+        response = await function_info.single_fn(
+            "## Analytical report task\n\n### Query\nCount orders.\n\n### Database\nregional_sales\n"
+        )
+    finally:
+        await registration.aclose()
+
+    invoked_state = agent_fn.ainvoke.await_args.args[0]
+    assert invoked_state.database_name == "regional_sales"
+    assert response.choices[0].message.content == "Answer: 3"
+
+
+@pytest.mark.asyncio
 async def test_hybrid_adapter_maps_router_context_and_returns_only_final_response():
     catalog = CatalogRoutingResponse(
         request_id="catalog-1",

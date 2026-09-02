@@ -26,6 +26,7 @@ class AnalysisRunState:
     temporary_directory: tempfile.TemporaryDirectory[str]
     root: Path
     manifest_path: Path
+    database_name: str | None = None
     gsf_results: list[dict[str, Any]] = field(default_factory=list)
     resources: dict[str, Any] = field(default_factory=dict)
     model_calls: int = 0
@@ -46,7 +47,7 @@ def _write_manifest(state: AnalysisRunState) -> None:
     staging.replace(state.manifest_path)
 
 
-def begin_analysis_run() -> Token[AnalysisRunState | None]:
+def begin_analysis_run(*, database_name: str | None = None) -> Token[AnalysisRunState | None]:
     """Create and install one isolated analytical runtime for this async request."""
 
     temporary_directory = tempfile.TemporaryDirectory(prefix="aiq-ds-analysis-", ignore_cleanup_errors=True)
@@ -56,6 +57,7 @@ def begin_analysis_run() -> Token[AnalysisRunState | None]:
         temporary_directory=temporary_directory,
         root=root,
         manifest_path=manifest_path,
+        database_name=database_name,
     )
     _write_manifest(state)
     return _CURRENT_ANALYSIS_RUN.set(state)

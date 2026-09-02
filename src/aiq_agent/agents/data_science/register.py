@@ -4,6 +4,7 @@
 """NAT registration and composition for the data-science agent."""
 
 import logging
+import re
 from typing import Any
 from typing import Literal
 
@@ -35,6 +36,14 @@ from .agent import DataScienceAgent
 from .models import DataScienceAgentState
 
 logger = logging.getLogger(__name__)
+_BENCHMARK_DATABASE_RE = re.compile(r"(?im)^### Database\s*\n\s*([^\n]+?)\s*$")
+
+
+def _benchmark_database_name(query: str) -> str | None:
+    """Extract the public database selector from an FDABench instruction."""
+
+    match = _BENCHMARK_DATABASE_RE.search(query)
+    return match.group(1).strip() if match else None
 
 
 class DataScienceAgentConfig(FunctionBaseConfig, name="data_science_agent"):
@@ -204,7 +213,12 @@ async def data_science_workflow(config: DataScienceWorkflowConfig, builder: Buil
 
     async def _run(query: str) -> ChatResponse:
         try:
-            result = await agent_fn.ainvoke(DataScienceAgentState(messages=[HumanMessage(content=query)]))
+            result = await agent_fn.ainvoke(
+                DataScienceAgentState(
+                    messages=[HumanMessage(content=query)],
+                    database_name=_benchmark_database_name(query),
+                )
+            )
             content = str(result.messages[-1].content)
         except EmptySourceRegistryError as exc:
             content = exc.public_response

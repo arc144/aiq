@@ -367,7 +367,10 @@ def test_prompt_renders_choice_contract_and_gsf_budget_guidance():
     template = (agent_module.AGENT_DIR / "prompts" / "agent.j2").read_text()
     rendered = render_prompt_template(
         template,
-        tools=[],
+        tools=[
+            {"name": "gsf__catalog_search", "description": "Search GSF catalog."},
+            {"name": "gsf__text_to_sql", "description": "Execute a GSF analytical query."},
+        ],
         user_info=None,
         database_name=None,
         catalog_context=None,
@@ -410,6 +413,36 @@ def test_prompt_renders_persistent_python_and_gsf_receipt_guidance():
     assert "statsmodels (`sm`)" in rendered
     assert "at most 8 Python calls" in rendered
     assert "first non-empty line `Answer: <direct answer>`" in rendered
+
+
+def test_prompt_renders_direct_sql_python_guidance_without_gsf_receipts():
+    template = (agent_module.AGENT_DIR / "prompts" / "agent.j2").read_text()
+    rendered = render_prompt_template(
+        template,
+        tools=[
+            {
+                "name": "python",
+                "description": "Persistent Python with the selected SQLite database connected read-only.",
+            }
+        ],
+        user_info=None,
+        database_name="regional_sales",
+        catalog_context=None,
+        catalog_request_id=None,
+        interaction_mode="headless",
+        response_mode="fdabench_choice",
+        gsf_catalog_call_limit=None,
+        gsf_text_to_sql_call_limit=None,
+        python_call_limit=32,
+        current_datetime="2026-08-26T12:00:00-03:00",
+    )
+
+    assert "The `python` tool is both the structured-data access path" in rendered
+    assert "`schema(table)`" in rendered
+    assert '`df = sql("""SELECT ...""")`' in rendered
+    assert "GSF is an agent-level tool" not in rendered
+    assert "Python has no configured connection" not in rendered
+    assert "at most 32 Python calls" in rendered
 
 
 def test_prompt_renders_preloaded_router_catalog_context_only_when_supplied():

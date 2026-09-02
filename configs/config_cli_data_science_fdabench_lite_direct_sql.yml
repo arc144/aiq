@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experimental FDABench-Lite ceiling profile. The main ReAct agent inspects and
+# queries the task-selected local SQLite database directly through one
+# request-scoped persistent Python process. There is deliberately no GSF or
+# nested text-to-SQL agent in this profile.
+
+general:
+  telemetry:
+    logging:
+      console:
+        _type: console
+        level: INFO
+
+llms:
+  data_science_llm:
+    _type: openai
+    model_name: ${AIQ_DATA_SCIENCE_MODEL:-nvidia/zai-org/glm-5.1}
+    base_url: ${AIQ_INFERENCE_BASE_URL}
+    api_key: ${INFERENCE_NVIDIA_API_KEY}
+    temperature: 0.2
+    max_tokens: 32768
+    num_retries: 2
+    request_timeout: 600
+
+functions:
+  data_sources:
+    _type: data_source_registry
+    sources:
+      - id: structured_data
+        name: "Local Benchmark Database"
+        description: "Inspect and query the task-selected FDABench SQLite database directly in persistent Python."
+        tools:
+          - python
+      - id: knowledge_base
+        name: "FDABench Knowledge Base"
+        description: "Search the configured FDABench document collection for unstructured evidence."
+        tools:
+          - knowledge_search
+      - id: web_search
+        name: "Web Search"
+        description: "Search the public web for current and external evidence."
+        tools:
+          - web_search_tool
+
+  knowledge_search:
+    _type: knowledge_retrieval
+    backend: foundational_rag
+    collection_name: ${COLLECTION_NAME}
+    top_k: ${RAG_TOP_K:-5}
+    rag_url: ${RAG_SERVER_URL}
+    ingest_url: ${RAG_INGEST_URL:-http://127.0.0.1:9/v1}
+    timeout: ${RAG_RETRIEVAL_TIMEOUT_SECONDS:-300}
+    summary_db: ${AIQ_SUMMARY_DB:-sqlite+aiosqlite:////tmp/aiq-ds-lite-direct-sql-summaries.db}
+    verify_ssl: ${RAG_VERIFY_SSL:-true}
+
+  web_search_tool:
+    _type: tavily_web_search
+    max_results: 5
+    advanced_search: true
+    max_content_length: 2000
+
+  python:
+    _type: stateful_python
+    database_root: ${FDABENCH_DB_ROOT}
+    wall_timeout_seconds: ${AIQ_DS_PYTHON_TIMEOUT_SECONDS:-120}
+    max_code_chars: 50000
+    max_output_chars: 50000
+
+  data_science_agent:
+    _type: data_science_agent
+    llm: data_science_llm
+    tools:
+      - knowledge_search
+      - web_search_tool
+      - python
+    interaction_mode: headless
+    response_mode: fdabench_choice
+    gsf_cache_repeated_calls: false
+    python_call_limit: ${AIQ_DS_PYTHON_CALL_LIMIT:-32}
+    finalization_model_call_limit: ${AIQ_DS_FINALIZATION_MODEL_CALL_LIMIT:-52}
+    recursion_limit: ${AIQ_DS_RECURSION_LIMIT:-128}
+    verbose: true
+
+workflow:
+  _type: data_science_workflow

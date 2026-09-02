@@ -28,11 +28,13 @@ class PersistentPythonSession:
     def __init__(
         self,
         *,
-        manifest_path: Path,
+        database_path: Path,
+        database_name: str,
         working_directory: Path,
         limits: PythonSessionLimits | None = None,
     ) -> None:
-        self.manifest_path = manifest_path
+        self.database_path = database_path
+        self.database_name = database_name
         self.working_directory = working_directory
         self.limits = limits or PythonSessionLimits()
         self._process: asyncio.subprocess.Process | None = None
@@ -50,7 +52,8 @@ class PersistentPythonSession:
             "-I",
             "-u",
             str(self._worker_path),
-            str(self.manifest_path),
+            str(self.database_path),
+            self.database_name,
             str(self.limits.max_output_chars),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
